@@ -1,0 +1,17 @@
+# OS and Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local logs & caches
+*.log
+__pycache__/
+*.pyc
+
+# Personal tokens / secrets
+*.token
+.env
