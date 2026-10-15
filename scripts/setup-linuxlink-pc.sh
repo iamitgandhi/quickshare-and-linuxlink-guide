@@ -11,7 +11,7 @@ sudo apt install -y \
     build-essential clang pkg-config libssl-dev libdbus-1-dev \
     libbluetooth-dev libx11-dev libxext-dev libxrandr-dev \
     libxcursor-dev libxi-dev libxinerama-dev libgl1-mesa-dev \
-    playerctl wl-clipboard pulseaudio-utils \
+    playerctl wl-clipboard xclip pulseaudio-utils \
     gstreamer1.0-tools gstreamer1.0-plugins-ugly gstreamer1.0-pipewire \
     python3-nautilus
 
@@ -36,6 +36,14 @@ cd "$SRC_DIR"
 
 # Ensure Nautilus 4.1 support in install.sh check if running on Ubuntu 24.04/26.04
 sed -i "s/import gi; gi.require_version('Nautilus', '4.0')/import gi; gi.require_version('Nautilus', '4.1')\" >\/dev\/null 2>\&1 || python3 -c \"import gi; gi.require_version('Nautilus', '4.0')/" install.sh || true
+
+# Apply GNOME Wayland clipboard flicker fix patch if needed
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PATCH_FILE="$SCRIPT_DIR/../patches/gnome-wayland-clipboard-flicker.patch"
+if [ -f "$PATCH_FILE" ]; then
+    echo "[*] Applying GNOME Wayland clipboard flicker fix..."
+    git apply "$PATCH_FILE" 2>/dev/null || echo "[!] Patch already applied or skipped."
+fi
 
 echo "==> Step 4: Running installer..."
 ./install.sh

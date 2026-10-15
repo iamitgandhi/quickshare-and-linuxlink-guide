@@ -1,0 +1,85 @@
+diff --git a/linkd/src/clipboard.rs b/linkd/src/clipboard.rs
+index 4f7cfdb..16ff7fe 100644
+--- a/linkd/src/clipboard.rs
++++ b/linkd/src/clipboard.rs
+@@ -252,6 +252,28 @@ impl ClipboardHub {
+     }
+ }
+ 
++fn supports_wl_paste_watch() -> bool {
++    match std::process::Command::new("wl-paste")
++        .args(["--watch", "true"])
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .spawn()
++    {
++        Ok(mut child) => {
++            std::thread::sleep(std::time::Duration::from_millis(50));
++            match child.try_wait() {
++                Ok(Some(_)) => false,
++                Ok(None) => {
++                    let _ = child.kill();
++                    true
++                }
++                Err(_) => false,
++            }
++        }
++        Err(_) => false,
++    }
++}
++
+ fn detect_backend() -> Backend {
+     let has = |cmd: &str| {
+         std::process::Command::new("which")
+@@ -261,10 +283,12 @@ fn detect_backend() -> Backend {
+             .map(|s| s.success())
+             .unwrap_or(false)
+     };
+-    if std::env::var("WAYLAND_DISPLAY").is_ok() && has("wl-paste") {
++    if std::env::var("WAYLAND_DISPLAY").is_ok() && has("wl-paste") && supports_wl_paste_watch() {
+         Backend::Wayland
+     } else if std::env::var("DISPLAY").is_ok() && has("xclip") {
+         Backend::X11
++    } else if std::env::var("WAYLAND_DISPLAY").is_ok() && has("wl-paste") {
++        Backend::Wayland
+     } else {
+         Backend::None
+     }
+diff --git a/linkd/src/clipwatch.rs b/linkd/src/clipwatch.rs
+index ffe3d7a..7c9fcdf 100644
+--- a/linkd/src/clipwatch.rs
++++ b/linkd/src/clipwatch.rs
+@@ -6,10 +6,16 @@ pub type Ticks = mpsc::Receiver<()>;
+ pub fn spawn(wayland: bool) -> Option<Ticks> {
+     let (tx, rx) = mpsc::channel(1);
+     if wayland {
+-        spawn_wayland(tx)?;
+-    } else {
+-        spawn_x11(tx)?;
++        if spawn_wayland(tx.clone()).is_some() {
++            return Some(rx);
++        }
++        // Fallback to X11 if wayland watcher failed (e.g. on GNOME/Mutter where wlr-data-control is unsupported)
++        if spawn_x11(tx).is_some() {
++            return Some(rx);
++        }
++        return None;
+     }
++    spawn_x11(tx)?;
+     Some(rx)
+ }
+ 
+@@ -25,6 +31,13 @@ fn spawn_wayland(tx: mpsc::Sender<()>) -> Option<()> {
+         .map_err(|e| tracing::warn!("wl-paste --watch unavailable: {e}"))
+         .ok()?;
+ 
++    // Wait briefly to verify wl-paste doesn't immediately exit (e.g. Mutter lacks wlr-data-control)
++    std::thread::sleep(std::time::Duration::from_millis(50));
++    if let Ok(Some(status)) = child.try_wait() {
++        tracing::warn!("wl-paste --watch exited immediately ({status}) — compositor does not support wlr-data-control");
++        return None;
++    }
++
+     let stdout = child.stdout.take()?;
+     tokio::spawn(async move {
+         let mut lines = BufReader::new(stdout).lines();

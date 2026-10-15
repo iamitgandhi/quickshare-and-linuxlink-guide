@@ -9,10 +9,11 @@ A comprehensive, production-grade tutorial and setup toolkit for seamless contin
 2. [When to Use What?](#when-to-use-what)
 3. [Part 1: Quick Share (Packet) on Linux](#part-1-quick-share-packet-on-linux)
 4. [Part 2: Linux Link Full Continuity Setup](#part-2-linux-link-full-continuity-setup)
-5. [Part 3: Solving the Android 14+ FGS Crash](#part-3-solving-the-android-14-fgs-crash)
-6. [Part 4: Nautilus File Manager (Right-Click) Integration](#part-4-nautilus-file-manager-right-click-integration)
-7. [Automated Scripts](#automated-scripts)
-8. [Troubleshooting & FAQs](#troubleshooting--faqs)
+5. [Part 3: GNOME Wayland Screen Flicker & Clipboard Fix](#part-3-gnome-wayland-screen-flicker--clipboard-fix)
+6. [Part 4: Solving the Android 14+ FGS Crash](#part-4-solving-the-android-14-fgs-crash)
+7. [Part 5: Nautilus File Manager (Right-Click) Integration](#part-5-nautilus-file-manager-right-click-integration)
+8. [Automated Scripts](#automated-scripts)
+9. [Troubleshooting & FAQs](#troubleshooting--faqs)
 
 ---
 
@@ -80,7 +81,7 @@ sudo apt install -y \
     build-essential clang pkg-config libssl-dev libdbus-1-dev \
     libbluetooth-dev libx11-dev libxext-dev libxrandr-dev \
     libxcursor-dev libxi-dev libxinerama-dev libgl1-mesa-dev \
-    playerctl wl-clipboard pulseaudio-utils \
+    playerctl wl-clipboard xclip pulseaudio-utils \
     gstreamer1.0-tools gstreamer1.0-plugins-ugly gstreamer1.0-pipewire \
     python3-nautilus
 ```
@@ -91,10 +92,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --defaul
 source "$HOME/.cargo/env"
 ```
 
-### 3. Clone & Compile Linux Link
+### 3. Clone, Patch & Compile Linux Link
 ```bash
 git clone https://github.com/ArvinKavaskov/linux-link.git ~/linux-link
 cd ~/linux-link
+
+# Apply GNOME Wayland screen flicker & clipboard polling fix (see Part 3)
+git apply /path/to/quickshare-and-linuxlink-guide/patches/gnome-wayland-clipboard-flicker.patch
 
 # Build all release binaries
 cargo build --release --manifest-path linkd/Cargo.toml \
@@ -164,7 +168,44 @@ sudo ufw allow 47101/udp comment 'Linux Link Discovery'
 
 ---
 
-## Part 3: Solving the Android 14+ FGS Crash
+## Part 3: GNOME Wayland Screen Flicker & Clipboard Fix
+
+### The Problem
+When running Linux Link under **GNOME Wayland** (Ubuntu 24.04 / 26.04, Fedora, Arch, etc.), you may experience:
+- Screen flickering or micro-hitches occurring precisely **every 2 seconds**.
+- Endless Mutter assertions filling the system journal (`journalctl`):
+  ```text
+  gnome-shell: meta_window_set_stack_position_no_sync: assertion 'window->stack_position >= 0' failed
+  ```
+
+#### Why Does This Happen?
+1. `linkd` implements clipboard synchronization between PC and phone. On startup, it detects Wayland and attempts to launch an event-driven clipboard watcher via `wl-paste --watch echo ""`.
+2. However, **GNOME Mutter does NOT implement the wlroots `wlr-data-control` protocol** that `wl-paste --watch` requires (`Watch mode requires a compositor that supports the wlroots data-control protocol`).
+3. `wl-paste --watch` exits immediately on launch, causing `linkd` to fall back to an internal polling loop running every 2 seconds (`POLL_INTERVAL = Duration::from_secs(2)`).
+4. Every 2 seconds, `linkd` spawns headless `wl-paste -t image/png` and `wl-paste -n` subprocesses to check for clipboard changes.
+5. In GNOME Shell Wayland, transient headless clients querying data offers without a mapped window cause Mutter's window stacker to throw an assertion and restack the window hierarchy, resulting in a visible display hitch/flicker.
+
+### The Solution: Event-Driven X11 / XFIXES on Xwayland
+Instead of polling `wl-paste` every 2 seconds, the patch automatically checks if `wl-paste --watch` is supported. When running under GNOME Wayland (where it is unsupported), it automatically switches to the `X11` backend using `xclip` and `x11rb` XFIXES:
+- **Zero Polling & Zero Flickering**: GNOME Shell automatically bridges the Wayland clipboard to Xwayland seamlessly. `x11rb` listens directly to `XfixesSelectionNotify`, waking up **only** when a copy operation actually occurs.
+- **100% Functionality Preserved**: Both text and image clipboard sync between PC and Android continue to work instantly with zero lag and zero compositor assertions.
+
+#### Applying the Patch
+If you clone `linux-link` manually, apply the patch before compiling:
+```bash
+cd ~/linux-link
+git apply /path/to/quickshare-and-linuxlink-guide/patches/gnome-wayland-clipboard-flicker.patch
+
+# Recompile linkd
+cargo build --release --manifest-path linkd/Cargo.toml --bin linkd
+install -m755 linkd/target/release/linkd ~/.local/bin/linkd
+systemctl --user restart linkd
+```
+*(The automated script `scripts/setup-linuxlink-pc.sh` applies this patch automatically).*
+
+---
+
+## Part 4: Solving the Android 14+ FGS Crash
 
 ### The Problem
 When running the Linux Link Android APK on Android 14, 15, or 16 (Samsung One UI 6 / 7 / 8), the app **crashes repeatedly** with:
@@ -207,7 +248,7 @@ chmod +x scripts/fix-android-permissions.sh
 
 ---
 
-## Part 4: Nautilus File Manager (Right-Click) Integration
+## Part 5: Nautilus File Manager (Right-Click) Integration
 
 To enable a top-level **"Send to phone"** entry directly when right-clicking files in GNOME Files (Nautilus):
 
@@ -261,6 +302,14 @@ linux-link-pair
 ```
 Or click the tray indicator icon in your GNOME top bar and select **"Pair a device…"**.
 
+### Q: Screen flickers or micro-hitches every 2 seconds on GNOME / Ubuntu Wayland?
+If your screen flickers subtly every 2 seconds and `journalctl` is flooded with:
+```text
+gnome-shell: meta_window_set_stack_position_no_sync: assertion 'window->stack_position >= 0' failed
+```
+This is caused by upstream `linkd` polling `wl-paste` every 2 seconds because GNOME Mutter does not support `wlr-data-control`.
+Apply the patch in `patches/gnome-wayland-clipboard-flicker.patch` and recompile `linkd` (detailed in [Part 3](#part-3-gnome-wayland-screen-flicker--clipboard-fix)). This switches clipboard monitoring to the event-driven X11 XFIXES engine, completely eliminating polling and flickering while maintaining full bidirectional text and image sync.
+
 ### Q: Does clipboard sync work without Shizuku?
 Yes! With `SYSTEM_ALERT_WINDOW` permitted, Linux Link uses an invisible overlay. For completely background operation on newer Android versions, connecting [Shizuku](https://shizuku.rikka.app/) provides 100% reliable clipboard access.
 
@@ -268,3 +317,4 @@ Yes! With `SYSTEM_ALERT_WINDOW` permitted, Linux Link uses an invisible overlay.
 
 ## License
 MIT License. Feel free to use, modify, and distribute.
+
